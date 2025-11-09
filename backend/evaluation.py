@@ -47,7 +47,9 @@ def evaluate_recommender():
     # --- 2. Initialize the Recommender ---
     recommender = Recommender(
         courses_path="./data/courses.csv",
-        careers_path="./data/careers.csv"
+        careers_path="./data/careers.csv",
+        model_path="./app/course_recommender_model.joblib",
+        metrics_path="./app/model_metrics.json"
     )
 
     # --- 3. Perform Evaluation ---

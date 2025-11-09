@@ -1,5 +1,6 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, validator
 from typing import List, Optional
+from datetime import datetime
 
 class SubjectGradePoints(BaseModel):
     subject: str
@@ -10,6 +11,7 @@ class Recommendation(BaseModel):
     id: Optional[int] = None  # Add id field
     name: str
     type: str
+    course_type: Optional[str] = None
     similarity_score: float
     description: str
     reasoning: str
@@ -31,6 +33,13 @@ class UserBase(BaseModel):
 
 class UserCreate(UserBase):
     password: str
+    password_confirmation: str
+
+    @validator('password_confirmation')
+    def passwords_match(cls, v, values, **kwargs):
+        if 'password' in values and v != values['password']:
+            raise ValueError('passwords do not match')
+        return v
 
 class User(UserBase):
     id: int
@@ -47,12 +56,22 @@ class TokenData(BaseModel):
     username: Optional[str] = None
 
 class RatingCreate(BaseModel):
-    recommendation_id: int
+    recommendation_id: Optional[int] = None
     rating: int
     comment: Optional[str] = None
 
 class Rating(RatingCreate):
     id: int
+
+    class Config:
+        orm_mode = True
+
+class RecommendationInDB(BaseModel):
+    id: int
+    user_id: int
+    course_name: Optional[str] = None
+    career_name: Optional[str] = None
+    created_at: datetime
 
     class Config:
         orm_mode = True

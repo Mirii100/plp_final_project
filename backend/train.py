@@ -8,13 +8,32 @@ from app.custom_transformers import MLBWrapper
 import joblib
 import json
 
+import pandas as pd
+from sklearn.model_selection import train_test_split
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.preprocessing import MultiLabelBinarizer
+from sklearn.pipeline import Pipeline
+from sklearn.compose import ColumnTransformer
+from app.custom_transformers import MLBWrapper
+import joblib
+import json
+import xgboost as xgb
+from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
+
+from sklearn.preprocessing import LabelEncoder, StandardScaler
+
 print("Starting model training process...")
 
 # --- 1. Load Data ---
-data_path = './data/synthetic_student_data.csv'
-df = pd.read_csv(data_path)
+# Course recommendation data
+course_data_path = './data/synthetic_student_data.csv'
+course_df = pd.read_csv(course_data_path)
 
-# --- 2. Feature Engineering ---
+# Career recommendation data
+career_data_path = './data/cleaned_dataset.csv'
+career_df = pd.read_csv(career_data_path)
+
+# --- 2. Feature Engineering (Course Recommendation) ---
 
 # Define grade to points mapping
 grade_points = {
@@ -26,30 +45,46 @@ grade_columns = ['Mathematics', 'Kiswahili', 'English', 'Arabic', 'German', 'Fre
 
 # Convert grades to points
 for col in grade_columns:
-    df[col] = df[col].map(grade_points)
+    course_df[col] = course_df[col].map(grade_points)
 
 # Handle interests and skills (convert comma-separated strings to lists)
 def split_str(s):
     return [item.strip() for item in s.split(',')] if isinstance(s, str) else []
 
-df['interests'] = df['interests'].apply(split_str)
-df['skills'] = df['skills'].apply(split_str)
+course_df['interests'] = course_df['interests'].apply(split_str)
+course_df['skills'] = course_df['skills'].apply(split_str)
 
-# --- 3. Prepare for Training ---
+# --- 3. Prepare for Training (Course Recommendation) ---
 
 # Define features (X) and target (y)
-X = df[grade_columns + ['interests', 'skills']]
-y = df['target_course_id']
+X_course = course_df[grade_columns + ['interests', 'skills']]
+y_course = course_df['target_course_id'] - 1 # Adjust target to be 0-indexed for XGBoost
 
 # Split data
-X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42, stratify=y)
+X_course_train, X_course_test, y_course_train, y_course_test = train_test_split(X_course, y_course, test_size=0.2, random_state=42, stratify=y_course)
 
-# --- 4. Create a Preprocessing and Modeling Pipeline ---
+# --- 4. Prepare for Training (Career Recommendation) ---
 
+# Define features (X_career) and target (y_career)
+# Numerical features from cleaned_dataset.csv
+numerical_career_cols = ['Linguistic', 'Musical', 'Bodily', 'Logical - Mathematical', 'Spatial-Visualization', 'Interpersonal', 'Intrapersonal', 'Naturalist']
+# Ordinal features (already mapped to numerical in cleaning script)
+ordinal_career_cols = ['P1', 'P2', 'P3', 'P4', 'P5', 'P6', 'P7', 'P8']
 
+X_career = career_df[numerical_career_cols + ordinal_career_cols]
+y_career = career_df['Job profession']
 
-# Define the column transformer
-preprocessor = ColumnTransformer(
+# Label Encode the `Job profession` target variable
+career_label_encoder = LabelEncoder()
+y_career_encoded = career_label_encoder.fit_transform(y_career)
+
+# Split data
+X_career_train, X_career_test, y_career_train, y_career_test = train_test_split(X_career, y_career_encoded, test_size=0.2, random_state=42, stratify=y_career_encoded)
+
+# --- 5. Create Preprocessing and Modeling Pipelines ---
+
+# Course Recommendation Preprocessor
+course_preprocessor = ColumnTransformer(
     transformers=[
         ('grades', 'passthrough', grade_columns),
         ('interests_bin', MLBWrapper(), 'interests'),
@@ -58,29 +93,100 @@ preprocessor = ColumnTransformer(
     remainder='drop'
 )
 
-# Define the full pipeline
-model_pipeline = Pipeline(steps=[
-    ('preprocessor', preprocessor),
+# --- Course Recommendation Pipelines ---
+rf_course_pipeline = Pipeline(steps=[
+    ('preprocessor', course_preprocessor),
     ('classifier', RandomForestClassifier(n_estimators=100, random_state=42, class_weight='balanced'))
 ])
 
-# --- 5. Train the Model ---
-print("Training the Random Forest model...")
-model_pipeline.fit(X_train, y_train)
+xgb_course_pipeline = Pipeline(steps=[
+    ('preprocessor', course_preprocessor),
+    ('classifier', xgb.XGBClassifier(objective='multi:softmax', num_class=len(y_course.unique()), use_label_encoder=False, eval_metric='mlogloss', n_estimators=100, random_state=42))
+])
 
-# --- 6. Evaluate the Model ---
-accuracy = model_pipeline.score(X_test, y_test)
-print(f"Model training complete. Accuracy on test set: {accuracy:.2f}")
+# Career Recommendation Preprocessor
+career_preprocessor = ColumnTransformer(
+    transformers=[
+        ('numerical', StandardScaler(), numerical_career_cols),
+        ('ordinal', 'passthrough', ordinal_career_cols)
+    ],
+    remainder='drop'
+)
 
-# --- 7. Save Metrics and Model ---
+# --- Career Recommendation Pipeline (using RandomForest for now) ---
+career_pipeline = Pipeline(steps=[
+    ('preprocessor', career_preprocessor),
+    ('classifier', RandomForestClassifier(n_estimators=100, random_state=42, class_weight='balanced'))
+])
 
-# Save metrics
+# --- 6. Train the Models ---
+print("Training the Random Forest course model...")
+rf_course_pipeline.fit(X_course_train, y_course_train)
+
+print("Training the XGBoost course model...")
+xgb_course_pipeline.fit(X_course_train, y_course_train)
+
+print("Training the Career recommendation model...")
+career_pipeline.fit(X_career_train, y_career_train)
+
+# --- 7. Evaluate the Models ---
+
+# Random Forest Course Evaluation
+rf_course_predictions = rf_course_pipeline.predict(X_course_test)
+rf_course_accuracy = accuracy_score(y_course_test, rf_course_predictions)
+rf_course_precision = precision_score(y_course_test, rf_course_predictions, average='weighted', zero_division=0)
+rf_course_recall = recall_score(y_course_test, rf_course_predictions, average='weighted', zero_division=0)
+rf_course_f1 = f1_score(y_course_test, rf_course_predictions, average='weighted', zero_division=0)
+print(f"Random Forest Course - Accuracy: {rf_course_accuracy:.2f}, Precision: {rf_course_precision:.2f}, Recall: {rf_course_recall:.2f}, F1-Score: {rf_course_f1:.2f}")
+
+# XGBoost Course Evaluation
+xgb_course_predictions = xgb_course_pipeline.predict(X_course_test)
+xgb_course_accuracy = accuracy_score(y_course_test, xgb_course_predictions)
+xgb_course_precision = precision_score(y_course_test, xgb_course_predictions, average='weighted', zero_division=0)
+xgb_course_recall = recall_score(y_course_test, xgb_course_predictions, average='weighted', zero_division=0)
+xgb_course_f1 = f1_score(y_course_test, xgb_course_predictions, average='weighted', zero_division=0)
+print(f"XGBoost Course - Accuracy: {xgb_course_accuracy:.2f}, Precision: {xgb_course_precision:.2f}, Recall: {xgb_course_recall:.2f}, F1-Score: {xgb_course_f1:.2f}")
+
+# Career Recommendation Evaluation
+career_predictions = career_pipeline.predict(X_career_test)
+career_accuracy = accuracy_score(y_career_test, career_predictions)
+career_precision = precision_score(y_career_test, career_predictions, average='weighted', zero_division=0)
+career_recall = recall_score(y_career_test, career_predictions, average='weighted', zero_division=0)
+career_f1 = f1_score(y_career_test, career_predictions, average='weighted', zero_division=0)
+print(f"Career Recommendation - Accuracy: {career_accuracy:.2f}, Precision: {career_precision:.2f}, Recall: {career_recall:.2f}, F1-Score: {career_f1:.2f}")
+
+# --- 8. Save Metrics and Models ---
+
 metrics_path = './app/model_metrics.json'
 with open(metrics_path, 'w') as f:
-    json.dump({"course_model_accuracy": accuracy}, f)
+    json.dump({
+        "random_forest_course": {
+            "accuracy": rf_course_accuracy,
+            "precision": rf_course_precision,
+            "recall": rf_course_recall,
+            "f1_score": rf_course_f1
+        },
+        "xgboost_course": {
+            "accuracy": xgb_course_accuracy,
+            "precision": xgb_course_precision,
+            "recall": xgb_course_recall,
+            "f1_score": xgb_course_f1
+        },
+        "career_recommendation": {
+            "accuracy": career_accuracy,
+            "precision": career_precision,
+            "recall": career_recall,
+            "f1_score": career_f1
+        }
+    }, f)
 print(f"Model metrics saved to {metrics_path}")
 
-# Save the Model
-model_path = './app/course_recommender_model.joblib'
-joblib.dump(model_pipeline, model_path)
-print(f"Model pipeline saved to {model_path}")
+# Save the Models
+joblib.dump(rf_course_pipeline, './app/random_forest_course_model.joblib')
+print("Random Forest course model pipeline saved to ./app/random_forest_course_model.joblib")
+joblib.dump(xgb_course_pipeline, './app/xgboost_course_model.joblib')
+print("XGBoost course model pipeline saved to ./app/xgboost_course_model.joblib")
+joblib.dump(career_pipeline, './app/career_recommendation_model.joblib')
+print("Career recommendation model pipeline saved to ./app/career_recommendation_model.joblib")
+joblib.dump(career_label_encoder, './app/career_label_encoder.joblib')
+print("Career label encoder saved to ./app/career_label_encoder.joblib")

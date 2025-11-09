@@ -11,6 +11,22 @@ class Student(BaseModel):
     grades: Dict[str, str]
     interests: List[str]
     skills: List[str]
+    linguistic: int
+    musical: int
+    bodily: int
+    logicalMathematical: int
+    spatialVisualization: int
+    interpersonal: int
+    intrapersonal: int
+    naturalist: int
+    p1: str
+    p2: str
+    p3: str
+    p4: str
+    p5: str
+    p6: str
+    p7: str
+    p8: str
 
 class User(Base):
     __tablename__ = "users"
@@ -39,8 +55,10 @@ class Recommendation(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     user_id = Column(Integer, ForeignKey("users.id"))
-    course_name = Column(String)
-    career_name = Column(String)
+    course_name = Column(String, nullable=True) # Allow null for career-only recommendations
+    career_name = Column(String, nullable=True) # Allow null for course-only recommendations
+    course_type = Column(String, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
 
     owner = relationship("User")
 

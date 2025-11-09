@@ -7,6 +7,12 @@ from sqlalchemy.orm import Session
 from datetime import timedelta
 import os
 import shutil
+import smtplib
+from email.message import EmailMessage
+import json
+import asyncio
+import time
+import subprocess
 
 from . import auth, models, schemas
 from .database import SessionLocal, engine, get_db
@@ -16,6 +22,65 @@ from .models import Student
 models.Base.metadata.create_all(bind=engine)
 
 app = FastAPI()
+
+# Global variable to store the last modification time of model files
+last_model_mtime = 0.0
+
+async def run_train_script_in_background():
+    """Runs the train.py script in a separate process."""
+    print("Starting background training script (train.py)...")
+    # Use subprocess.Popen to run train.py without blocking the main thread
+    # stdout and stderr are redirected to pipes to prevent blocking
+    process = subprocess.Popen(
+        ["python", "train.py"],
+        cwd=".", # train.py is in the current working directory (backend)
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE
+    )
+    # You can read stdout/stderr if needed, but for a background task,
+    # it might be sufficient to just let it run.
+    # For debugging, you might want to log these.
+    stdout, stderr = process.communicate()
+    if process.returncode != 0:
+        print(f"Error running train.py: {stderr.decode()}")
+    else:
+        print(f"train.py completed successfully: {stdout.decode()}")
+
+async def monitor_and_reload_models():
+    """Monitors model files for changes and reloads them dynamically."""
+    global last_model_mtime
+    model_paths = [recommender.rf_model_path, recommender.xgb_model_path]
+    
+    # Initialize last_model_mtime with the current modification time of the newest model
+    for path in model_paths:
+        if os.path.exists(path):
+            current_mtime = os.path.getmtime(path)
+            if current_mtime > last_model_mtime:
+                last_model_mtime = current_mtime
+
+    while True:
+        await asyncio.sleep(10)  # Check every 10 seconds
+        
+        updated = False
+        for path in model_paths:
+            if os.path.exists(path):
+                current_mtime = os.path.getmtime(path)
+                if current_mtime > last_model_mtime:
+                    print(f"Detected change in model file: {path}. Reloading models...")
+                    recommender._load_models()
+                    last_model_mtime = current_mtime
+                    updated = True
+                    break # Only need to reload once if any model file changes
+        
+        if updated:
+            print("Models reloaded successfully.")
+
+@app.on_event("startup")
+async def startup_event():
+    # Run train.py in the background once on startup
+    asyncio.create_task(run_train_script_in_background())
+    # Start monitoring model files for changes
+    asyncio.create_task(monitor_and_reload_models())
 
 # Create a directory for static files if it doesn't exist
 STATIC_DIR = "static"
@@ -37,11 +102,41 @@ app.add_middleware(
 )
 
 recommender = Recommender(
-    courses_path="./data/courses.csv",
-    careers_path="./data/careers.csv",
-    model_path="./app/course_recommender_model.joblib",
-    metrics_path="./app/model_metrics.json"
+    courses_path="data/courses.csv",
+    careers_path="data/careers.csv",
+    rf_model_path="app/random_forest_course_model.joblib", # Updated path
+    xgb_model_path="app/xgboost_course_model.joblib", # Updated path
+    metrics_path="app/model_metrics.json",
+    career_model_path="app/career_recommendation_model.joblib", # New path
+    career_label_encoder_path="app/career_label_encoder.joblib" # New path
 )
+
+# --- Email Configuration (Replace with your actual details or environment variables) ---
+# You need to set these environment variables or replace them with your actual SMTP details.
+# Example for Gmail: SMTP_HOST='smtp.gmail.com', SMTP_PORT=587, SMTP_USERNAME='your_email@gmail.com', SMTP_PASSWORD='your_app_password'
+SMTP_HOST = os.getenv("SMTP_HOST", "smtp.example.com")
+SMTP_PORT = int(os.getenv("SMTP_PORT", 587))
+SMTP_USERNAME = os.getenv("SMTP_USERNAME", "your_email@example.com")
+SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "your_email_password")
+SENDER_EMAIL = os.getenv("SENDER_EMAIL", "no-reply@example.com")
+
+def send_email(to_email: str, subject: str, body: str):
+    msg = EmailMessage()
+    msg.set_content(body)
+    msg['Subject'] = subject
+    msg['From'] = SENDER_EMAIL
+    msg['To'] = to_email
+
+    try:
+        with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as smtp:
+            smtp.starttls()
+            smtp.login(SMTP_USERNAME, SMTP_PASSWORD)
+            smtp.send_message(msg)
+        print(f"Email sent successfully to {to_email}")
+    except Exception as e:
+        print(f"Failed to send email to {to_email}: {e}")
+        # In a real application, you might log this error or raise an HTTPException
+# -----------------------------------------------------------------------------------
 
 @app.post("/token", response_model=schemas.Token)
 async def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
@@ -96,16 +191,11 @@ async def forgot_password(request: schemas.ForgotPasswordRequest, db: Session = 
     
     token = auth.generate_password_reset_token(db, user.id)
     
-    # --- Placeholder for actual email sending logic ---
     reset_link = f"http://localhost:3000/reset-password/{token}"
     email_body = f"Hello {user.username},\n\nTo reset your password, please click on the following link: {reset_link}\n\nThis link will expire in {auth.PASSWORD_RESET_TOKEN_EXPIRE_MINUTES} minutes.\n\nIf you did not request a password reset, please ignore this email.\n\nBest regards,\nYour App Team"
     
-    print(f"\n--- SIMULATED EMAIL TO: {user.email} ---")
-    print(email_body)
-    print("---------------------------------------\n")
-    # In a real application, you would use an email sending library here (e.g., SMTPLib, SendGrid, Mailgun)
-    # Example: send_email(to_email=user.email, subject="Password Reset Request", body=email_body)
-    # ---------------------------------------------------
+    # Send the actual email
+    send_email(to_email=user.email, subject="Password Reset Request", body=email_body)
     
     return {"message": "If an account with that email exists, a password reset token has been sent."}
 
@@ -125,6 +215,13 @@ async def reset_password(request: schemas.ResetPasswordRequest, db: Session = De
 
 @app.post("/recommend", response_model=schemas.Recommendations)
 def get_recommendations(student: Student, db: Session = Depends(get_db), current_user: schemas.User = Depends(auth.get_current_user)):
+    # Validate that the number of subjects does not exceed 7
+    if len(student.grades) > 7:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="The number of subjects cannot exceed 7."
+        )
+
     recommendations = recommender.recommend(student)
 
     saved_recommendations = []
@@ -134,7 +231,8 @@ def get_recommendations(student: Student, db: Session = Depends(get_db), current
         db_recommendation = models.Recommendation(
             user_id=current_user.id,
             course_name=course_rec['name'],
-            career_name=None # This is a course recommendation, so career_name is None
+            career_name=None, # This is a course recommendation, so career_name is None
+            course_type=course_rec['type']
         )
         db.add(db_recommendation)
         saved_recommendations.append(db_recommendation)
@@ -171,20 +269,45 @@ def create_rating(
     db: Session = Depends(get_db),
     current_user: schemas.User = Depends(auth.get_current_user)
 ):
-    db_rating = models.Rating(
-        recommendation_id=rating_data.recommendation_id,
-        rating=rating_data.rating,
-        comment=rating_data.comment
-    )
-    db.add(db_rating)
-    db.commit()
-    db.refresh(db_rating)
-    return db_rating
+    try:
+        db_rating = models.Rating(
+            recommendation_id=rating_data.recommendation_id,
+            rating=rating_data.rating,
+            comment=rating_data.comment
+        )
+        db.add(db_rating)
+        db.commit()
+        db.refresh(db_rating)
+        return db_rating
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"Validation error: {e}"
+        )
 
 @app.get("/ratings/", response_model=List[schemas.Rating])
 def get_all_ratings(db: Session = Depends(get_db)):
     ratings = db.query(models.Rating).all()
     return ratings
+
+@app.get("/model-metrics/")
+def get_model_metrics():
+    try:
+        with open(recommender.metrics_path, 'r') as f:
+            metrics = json.load(f)
+        return metrics
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Model metrics file not found.")
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=500, detail="Error decoding model metrics file.")
+
+@app.get("/recommendations/history/", response_model=List[schemas.RecommendationInDB])
+def get_recommendation_history(
+    db: Session = Depends(get_db),
+    current_user: schemas.User = Depends(auth.get_current_user)
+):
+    history = db.query(models.Recommendation).filter(models.Recommendation.user_id == current_user.id).order_by(models.Recommendation.created_at.desc()).all()
+    return history
 
 @app.get("/")
 def read_root():
