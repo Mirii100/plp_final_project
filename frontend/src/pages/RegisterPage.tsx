@@ -21,8 +21,8 @@ const RegisterPage: React.FC = () => {
       return;
     }
 
-    try {
-      const response = await fetch('http://localhost:8000/users/', {
+    try {//'http://localhost:8000/users/' - when offline 
+      const response = await fetch( 'https://ml-project-dji6.onrender.com/users/', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ username, email, password, password_confirmation: confirmPassword }), // Include email and password_confirmation in the body
