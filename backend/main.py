@@ -13,8 +13,8 @@ import json
 import asyncio
 import time
 import subprocess
-
-import auth, models, schemas
+from app import auth, models, schemas
+# import auth, models, schemas
 from .database import SessionLocal, engine, get_db
 from .recommender import Recommender
 from .models import Student
