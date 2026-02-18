@@ -14,7 +14,7 @@ import asyncio
 import time
 import subprocess
 
-from . import auth, models, schemas
+import auth, models, schemas
 from .database import SessionLocal, engine, get_db
 from .recommender import Recommender
 from .models import Student
