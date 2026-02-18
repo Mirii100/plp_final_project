@@ -18,11 +18,17 @@ from app import auth, models, schemas
 from .database import SessionLocal, engine, get_db
 from .recommender import Recommender
 from .models import Student
-
+from fastapi.middleware.cors import CORSMiddleware
 models.Base.metadata.create_all(bind=engine)
 
 app = FastAPI()
-
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # For testing, allows all. For production, put your frontend URL here.
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 # Global variable to store the last modification time of model files
 last_model_mtime = 0.0
 
